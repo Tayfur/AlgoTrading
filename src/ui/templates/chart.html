@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>BTC Trading Analyzer</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        body { 
+            background: #131722; 
+            color: #d1d4dc;
+            margin: 0;
+            padding: 20px;
+        }
+        #chart {
+            width: 100%;
+            height: 600px;
+        }
+        #timeframe-selector {
+            margin-bottom: 20px;
+        }
+        .timeframe-btn {
+            background: #2962FF;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            margin-right: 10px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        .timeframe-btn.active {
+            background: #1E88E5;
+        }
+        #signals {
+            margin-top: 20px;
+            padding: 10px;
+            background: #1e222d;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div id="timeframe-selector">
+        <button class="timeframe-btn active" data-tf="5m">5 Min</button>
+        <button class="timeframe-btn" data-tf="30m">30 Min</button>
+        <button class="timeframe-btn" data-tf="1h">1 Hour</button>
+    </div>
+    <div id="chart"></div>
+    <div id="signals"></div>
+    <script>
+        let currentTimeframe = '5m';
+        let ws = null;
+        
+        const chart = LightweightCharts.createChart(document.getElementById('chart'), {
+            width: window.innerWidth - 40,
+            height: 600,
+            layout: {
+                background: { color: '#131722' },
+                textColor: '#d1d4dc',
+            },
+            grid: {
+                vertLines: { color: '#242732' },
+                horzLines: { color: '#242732' },
+            },
+            crosshair: {
+                mode: LightweightCharts.CrosshairMode.Normal,
+            },
+            rightPriceScale: {
+                borderColor: '#242732',
+            },
+            timeScale: {
+                borderColor: '#242732',
+                timeVisible: true,
+                secondsVisible: false
+            },
+        });
+
+        const candleSeries = chart.addCandlestickSeries({
+            upColor: '#26a69a',
+            downColor: '#ef5350',
+            borderVisible: false,
+            wickUpColor: '#26a69a',
+            wickDownColor: '#ef5350',
+        });
+
+        function connectWebSocket() {
+            if (ws) {
+                ws.close();
+            }
+
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${wsProtocol}//${window.location.host}/ws`);
+            
+            // Store candle data for each timeframe
+            const candleData = {
+                '5m': [],
+                '30m': [],
+                '1h': []
+            };
+            
+            ws.onopen = function() {
+                console.log('WebSocket Connected');
+                // Request initial data
+                requestData(currentTimeframe);
+                
+                // Set up periodic data refresh
+                setInterval(() => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        requestData(currentTimeframe);
+                    }
+                }, 1000); // Update every second
+            };
+
+            ws.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                
+                switch(data.type) {
+                    case 'candle':
+                        const candle = data.candle;
+                        updateChart({
+                            time: parseInt(candle.time) / 1000,
+                            open: parseFloat(candle.open),
+                            high: parseFloat(candle.high),
+                            low: parseFloat(candle.low),
+                            close: parseFloat(candle.close)
+                        });
+                        break;
+                        
+                    case 'history':
+                        candleData[currentTimeframe] = data.candles;
+                        loadHistoricalData(data.candles);
+                        break;
+                        
+                    case 'signal':
+                        updateSignals(data.signal);
+                        break;
+                }
+            };
+
+            ws.onerror = function(error) {
+                console.error('WebSocket error:', error);
+            };
+
+            ws.onclose = function() {
+                console.log('WebSocket disconnected, reconnecting...');
+                setTimeout(connectWebSocket, 5000);
+            };
+        }
+
+        function requestData(timeframe) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'subscribe',
+                    timeframe: timeframe
+                }));
+            }
+        }
+
+        function updateChart(candle) {
+            if (!candle) return;
+            
+            candleSeries.update({
+                time: parseInt(candle.time),
+                open: parseFloat(candle.open),
+                high: parseFloat(candle.high),
+                low: parseFloat(candle.low),
+                close: parseFloat(candle.close)
+            });
+        }
+
+        function loadHistoricalData(candles) {
+            if (!Array.isArray(candles) || candles.length === 0) return;
+            
+            const chartData = candles.map(candle => ({
+                time: parseInt(candle.time),
+                open: parseFloat(candle.open),
+                high: parseFloat(candle.high),
+                low: parseFloat(candle.low),
+                close: parseFloat(candle.close)
+            }));
+
+            // Sort data by time
+            chartData.sort((a, b) => a.time - b.time);
+            
+            // Set the data to the chart
+            candleSeries.setData(chartData);
+        }
+
+        function updateSignals(signal) {
+            const signalsDiv = document.getElementById('signals');
+            const color = signal.Type === 'up' ? '#26a69a' : '#ef5350';
+            const html = `
+                <div style="color: ${color}; margin: 5px 0;">
+                    ${signal.TimeFrame}: ${signal.Type.toUpperCase()} 
+                    Price: $${signal.Price.toFixed(2)} 
+                    Risk: ${signal.Risk.toFixed(1)}%
+                </div>
+            `;
+            signalsDiv.innerHTML = html + signalsDiv.innerHTML;
+        }
+
+        // Handle timeframe selection
+        document.querySelectorAll('.timeframe-btn').forEach(button => {
+            button.addEventListener('click', function() {
+                document.querySelectorAll('.timeframe-btn').forEach(btn => btn.classList.remove('active'));
+                this.classList.add('active');
+                currentTimeframe = this.dataset.tf;
+                
+                // Clear current data
+                candleSeries.setData([]);
+                
+                // Request new timeframe data
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'subscribe',
+                        timeframe: currentTimeframe
+                    }));
+                }
+            });
+        });
+
+        // Initial connection
+        connectWebSocket();
+
+        window.addEventListener('resize', () => {
+            chart.applyOptions({
+                width: window.innerWidth - 40,
+            });
+        });
+    </script>
+</body>
+</html>
