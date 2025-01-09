@@ -69,7 +69,13 @@
             timeScale: {
                 borderColor: '#242732',
                 timeVisible: true,
-                secondsVisible: false
+                secondsVisible: false,
+                tickMarkFormatter: (time) => {
+                    const date = new Date(time * 1000);
+                    const hours = date.getHours().toString().padStart(2, '0');
+                    const minutes = date.getMinutes().toString().padStart(2, '0');
+                    return `${hours}:${minutes}`;
+                }
             },
         });
 
@@ -80,6 +86,15 @@
             wickUpColor: '#26a69a',
             wickDownColor: '#ef5350',
         });
+
+        const signalMarkers = [];
+        let supportLines = [];
+        let resistanceLines = [];
+        const { LineStyle } = LightweightCharts;
+
+        let lastUpdateTime = 0;
+        const updateInterval = 1000; // 1 second minimum between updates
+        let currentLevels = [];
 
         function connectWebSocket() {
             if (ws) {
@@ -111,26 +126,21 @@
 
             ws.onmessage = function(event) {
                 const data = JSON.parse(event.data);
+                console.log('Received data:', data);
                 
                 switch(data.type) {
-                    case 'candle':
-                        const candle = data.candle;
-                        updateChart({
-                            time: parseInt(candle.time) / 1000,
-                            open: parseFloat(candle.open),
-                            high: parseFloat(candle.high),
-                            low: parseFloat(candle.low),
-                            close: parseFloat(candle.close)
-                        });
+                    case 'update':
+                        // Only update levels if timeframe matches current
+                        if (data.timeframe === currentTimeframe) {
+                            console.log(`Updating levels for ${data.timeframe}`);
+                            updateChart(data);
+                        }
                         break;
-                        
                     case 'history':
                         candleData[currentTimeframe] = data.candles;
                         loadHistoricalData(data.candles);
-                        break;
-                        
-                    case 'signal':
-                        updateSignals(data.signal);
+                        // Request levels for new timeframe
+                        requestData(currentTimeframe);
                         break;
                 }
             };
@@ -154,15 +164,69 @@
             }
         }
 
-        function updateChart(candle) {
-            if (!candle) return;
+        function updateChart(data) {
+            // Update candle
+            if (data.candle) {
+                candleSeries.update({
+                    time: parseInt(data.candle.Time) / 1000,
+                    open: parseFloat(data.candle.Open),
+                    high: parseFloat(data.candle.High),
+                    low: parseFloat(data.candle.Low),
+                    close: parseFloat(data.candle.Close)
+                });
+            }
+
+            // Update support/resistance lines only if they changed
+            if (data.levels && Array.isArray(data.levels)) {
+                const levelsString = JSON.stringify(data.levels);
+                if (levelsString !== currentLevels) {
+                    currentLevels = levelsString;
+                    updateSupportResistanceLines(data.levels);
+                }
+            }
+        }
+
+        function updateSupportResistanceLines(levels) {
+            console.log(`Updating ${levels.length} levels`);
             
-            candleSeries.update({
-                time: parseInt(candle.time),
-                open: parseFloat(candle.open),
-                high: parseFloat(candle.high),
-                low: parseFloat(candle.low),
-                close: parseFloat(candle.close)
+            // Remove old lines
+            supportLines.forEach(line => {
+                try {
+                    candleSeries.removePriceLine(line);
+                } catch (e) {
+                    console.log('Error removing line:', e);
+                }
+            });
+            resistanceLines.forEach(line => {
+                try {
+                    candleSeries.removePriceLine(line);
+                } catch (e) {
+                    console.log('Error removing line:', e);
+                }
+            });
+            supportLines = [];
+            resistanceLines = [];
+
+            // Add new lines
+            levels.forEach(level => {
+                try {
+                    const line = candleSeries.createPriceLine({
+                        price: parseFloat(level.Price),
+                        color: level.Type === 'support' ? '#26a69a' : '#ef5350',
+                        lineWidth: 2,
+                        lineStyle: LineStyle.Dashed,
+                        axisLabelVisible: true,
+                        title: `${level.Type.toUpperCase()} (${level.Strength.toFixed(0)}%)`,
+                    });
+
+                    if (level.Type === 'support') {
+                        supportLines.push(line);
+                    } else {
+                        resistanceLines.push(line);
+                    }
+                } catch (e) {
+                    console.log('Error creating line:', e);
+                }
             });
         }
 
@@ -225,6 +289,8 @@
                 width: window.innerWidth - 40,
             });
         });
+
+
     </script>
 </body>
 </html>

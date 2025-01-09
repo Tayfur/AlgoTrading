@@ -102,19 +102,22 @@ func (c *ChartUI) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if msg.Type == "subscribe" && msg.Timeframe != "" {
-			// Get historical data
-			candles, err := c.client.GetCandles("BTCUSDT", msg.Timeframe, 1000)
+			// Get more historical data for S/R analysis
+			candles, err := c.client.GetCandles("BTCUSDT", msg.Timeframe, 500)
 			if err != nil {
 				log.Printf("Error fetching historical candles: %v", err)
 				continue
 			}
 
-			// Send historical data
+			levels := analyzer.FindSupportResistance(candles)
+			log.Printf("Found %d S/R levels for timeframe %s", len(levels), msg.Timeframe)
+
 			if err := conn.WriteJSON(map[string]interface{}{
 				"type":    "history",
 				"candles": candles,
+				"levels":  levels,
 			}); err != nil {
-				log.Printf("Error sending historical data: %v", err)
+				log.Printf("Error sending data: %v", err)
 				break
 			}
 		}
@@ -162,7 +165,7 @@ func (c *ChartUI) collectSignals(signalChan chan analyzer.Signal) {
 
 	for range ticker.C {
 		for _, tf := range timeframes {
-			candles, err := c.client.GetCandles("BTCUSDT", tf, 100)
+			candles, err := c.client.GetCandles("BTCUSDT", tf, 500)
 			if err != nil {
 				log.Printf("Error fetching %s candles: %v", tf, err)
 				continue
@@ -186,42 +189,58 @@ func (c *ChartUI) collectSignals(signalChan chan analyzer.Signal) {
 }
 
 func (c *ChartUI) collectData(conn *websocket.Conn, candleChan chan models.Candle, signalChan chan analyzer.Signal) {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
+	candleTicker := time.NewTicker(2 * time.Second)
+	levelsTicker := time.NewTicker(5 * time.Minute) // Update levels every 5 minutes
+	defer candleTicker.Stop()
+	defer levelsTicker.Stop()
 
-	for range ticker.C {
-		candles, err := c.client.GetCandles("BTCUSDT", "1m", 1)
+	timeframes := []string{"5m", "30m", "1h"}
+	levels := make(map[string][]analyzer.PriceLevel) // Cache for levels
+
+	// Initial level calculation
+	for _, tf := range timeframes {
+		candles, err := c.client.GetCandles("BTCUSDT", tf, 500)
 		if err != nil {
-			log.Printf("Error fetching latest candle: %v", err)
+			log.Printf("Error fetching %s candles: %v", tf, err)
 			continue
 		}
+		levels[tf] = analyzer.FindSupportResistance(candles)
+	}
 
-		if len(candles) > 0 {
-			if err := conn.WriteJSON(map[string]interface{}{
-				"type":   "candle",
-				"candle": candles[0],
-			}); err != nil {
-				return
+	for {
+		select {
+		case <-candleTicker.C:
+			// Update candles frequently
+			for _, tf := range timeframes {
+				candles, err := c.client.GetCandles("BTCUSDT", tf, 1)
+				if err != nil {
+					log.Printf("Error fetching %s candle: %v", tf, err)
+					continue
+				}
+
+				if len(candles) > 0 {
+					update := map[string]interface{}{
+						"type":      "update",
+						"timeframe": tf,
+						"candle":    candles[0],
+						"levels":    levels[tf], // Use cached levels
+					}
+					if err := conn.WriteJSON(update); err != nil {
+						log.Printf("Error sending update: %v", err)
+						return
+					}
+				}
 			}
-		}
 
-		// Send signals every minute
-		if time.Now().Second() == 0 {
-			if len(candles) > 0 {
-				prediction := analyzer.PredictPrice(candles, "1m")
-				signal := analyzer.Signal{
-					Type:      prediction.Direction,
-					Price:     candles[0].Close,
-					Risk:      calculateRisk(candles),
-					TimeFrame: "1m",
+		case <-levelsTicker.C:
+			// Recalculate levels periodically
+			for _, tf := range timeframes {
+				candles, err := c.client.GetCandles("BTCUSDT", tf, 500)
+				if err != nil {
+					log.Printf("Error fetching %s candles: %v", tf, err)
+					continue
 				}
-
-				if err := conn.WriteJSON(map[string]interface{}{
-					"type":   "signal",
-					"signal": signal,
-				}); err != nil {
-					return
-				}
+				levels[tf] = analyzer.FindSupportResistance(candles)
 			}
 		}
 	}
